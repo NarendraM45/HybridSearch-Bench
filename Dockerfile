@@ -5,7 +5,7 @@ WORKDIR /build
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    build-essential gcc g++ python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

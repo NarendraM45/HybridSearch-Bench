@@ -6,8 +6,7 @@ import pandas as pd
 from pathlib import Path
 
 from settings import get_settings
-from logging import get_logger
-from pipeline import IngestionPipeline
+from logger_config import get_logger
 from retrieval import run_all_strategies, build_bm25_index
 from evaluation import evaluate_all_strategies
 
@@ -42,10 +41,10 @@ def ingest(pdf_dir: str, collection: str):
     s = get_settings()
     s.collection_name = collection
     
-    # Actually use the pipeline
-    pipeline = IngestionPipeline()
     try:
-        pipeline.run(pdf_path)
+        with open(pdf_files[0], 'rb') as f:
+            pdf_bytes = f.read()
+        ingest_pdf(pdf_bytes, pdf_files[0].name)
         click.secho("Ingestion complete.", fg="green")
     except Exception as e:
         log.exception("Ingestion failed")

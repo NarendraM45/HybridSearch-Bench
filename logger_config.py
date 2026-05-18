@@ -13,7 +13,7 @@ Why structlog?
 
 Usage
 -----
-    from logging import get_logger
+    from logger_config import get_logger
 
     log = get_logger(__name__)
     log.info("retrieval.complete", strategy="hybrid", n_results=5, latency_ms=42.3)

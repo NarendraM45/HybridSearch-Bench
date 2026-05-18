@@ -16,7 +16,7 @@ keywords = ["rag", "retrieval", "bm25", "vector-search", "ragas", "llm", "nlp"]
 hybridsearch = "cli:main"
 
 [tool.setuptools]
-py-modules = ["app", "chroma_store", "chunker", "config", "embedder", "evaluation", "exceptions", "ingestion", "interfaces", "logging", "pipeline", "retrieval", "settings", "cli", "metrics", "__init__"]
+py-modules = ["app", "chroma_store", "chunker", "config", "embedder", "evaluation", "exceptions", "ingestion", "interfaces", "logger_config", "pipeline", "retrieval", "settings", "cli", "metrics", "__init__"]
 
 # ── Pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

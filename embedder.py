@@ -19,7 +19,7 @@ import numpy as np
 
 from settings import get_settings
 from exceptions import EmbeddingError
-from logging import get_logger
+from logger_config import get_logger
 
 if TYPE_CHECKING:
     from langchain_core.embeddings import Embeddings as LCEmbeddings

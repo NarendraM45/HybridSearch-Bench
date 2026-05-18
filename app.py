@@ -30,6 +30,39 @@ st.set_page_config(
 
 logging.basicConfig(level=logging.WARNING)
 
+def wait_for_ollama():
+    import urllib.request
+    import urllib.error
+    from settings import get_settings
+    settings = get_settings()
+    url = settings.ollama_base_url.rstrip("/") + "/"
+    
+    # Do a quick check first without showing UI if it's already up
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=1.0) as response:
+            if response.status == 200:
+                return
+    except (urllib.error.URLError, TimeoutError):
+        pass
+
+    status_placeholder = st.empty()
+    retries = 30  # 30 * 5 = 150 seconds
+    for i in range(retries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url), timeout=3.0) as response:
+                if response.status == 200:
+                    status_placeholder.empty()
+                    return
+        except (urllib.error.URLError, TimeoutError):
+            pass
+        status_placeholder.warning(f"⏳ Waiting for Ollama (local LLM & embeddings) to initialize... (Attempt {i+1}/{retries})")
+        time.sleep(5)
+    
+    status_placeholder.error("🚨 Ollama failed to initialize within the timeout period. Please check the `ollama-init` container logs.")
+    st.stop()
+
+wait_for_ollama()
+
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown(
     """

@@ -30,7 +30,7 @@ from typing import Any
 from langchain_community.document_loaders import PyPDFLoader
 
 from settings import ChunkStrategy, get_settings
-from logging import get_logger
+from logger_config import get_logger
 from exceptions import ChunkingError, IngestionError, PDFLoadError
 from interfaces import Document
 from chunker import build_chunker

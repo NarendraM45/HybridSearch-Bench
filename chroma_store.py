@@ -20,7 +20,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from settings import get_settings
-from logging import get_logger
+from logger_config import get_logger
 from exceptions import CollectionNotFoundError, StoreError
 from interfaces import Document, RetrievalResult
 
