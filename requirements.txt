@@ -21,4 +21,7 @@ datasets>=2.19.0
 pandas>=2.2.0
 numpy>=1.26.0
 plotly>=5.22.0
+matplotlib>=3.8.0
 scipy>=1.13.0
+spacy>=3.7.0
+ragatouille>=0.0.8

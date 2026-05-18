@@ -13,8 +13,9 @@ EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"   # ~80 MB, fast, good quality
 EMBEDDING_DIM: int = 384
 
 # ── Vector Store (ChromaDB) ───────────────────────────────────────────────────
+# Kept in sync with settings.Settings defaults (single source: settings.py).
 CHROMA_PERSIST_DIR: str = "./chroma_db"
-COLLECTION_NAME: str = "hybridsearch_bench"
+COLLECTION_NAME: str = "hybrid_bench"
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K: int = 5                 # Number of documents to retrieve per strategy
