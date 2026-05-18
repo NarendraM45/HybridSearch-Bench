@@ -1,183 +1,375 @@
-# HybridSearch Bench
+<div align="center">
 
-Production-grade RAG evaluation framework with hybrid retrieval (BM25 + Dense Vector + RRF fusion) and automatic RAGAS-based evaluation. Fully local — no paid APIs, runs on Ollama.
+# 🔍 HybridSearch Bench
 
-## Architecture Diagram
+**Production-grade RAG evaluation framework with hybrid retrieval and automatic RAGAS-based scoring.**  
+*Fully local. Zero paid APIs. Runs on Ollama.*
 
-```
-         [ PDFs ]
-            |
-            v
-     +--------------+
-     |   Chunking   | (Recursive)
-     +--------------+
-            |
-    +-------+-------+
-    |               |
-    v               v
- [ BM25 ]      [ Vector ] (ChromaDB + Nomic Embed)
-    |               |
-    +-------+-------+
-            |
-            v
-     +--------------+
-     |  RRF Fusion  | (Hybrid)
-     +--------------+
-            |
-            v
-     +--------------+
-     |   Ollama     | (llama3.2)
-     | Generation   |
-     +--------------+
-            |
-            v
-     +--------------+
-     |    RAGAS     | (Faithfulness, Relevancy, Precision)
-     |  Evaluation  |
-     +--------------+
-```
+<br/>
 
-## Features
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Ollama](https://img.shields.io/badge/Ollama-Local%20LLM-black?style=for-the-badge&logo=ollama&logoColor=white)](https://ollama.com)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Store-FF6B35?style=for-the-badge)](https://trychroma.com)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge)](LICENSE)
 
-- **Hybrid Retrieval**: Combines sparse (BM25) and dense (Vector) retrieval using Reciprocal Rank Fusion (RRF).
-- **Local LLM Integration**: Fully powered by Ollama (`llama3.2` and `nomic-embed-text`) - no API keys required.
-- **First-Principles Metrics**: Custom IR metrics implemented from scratch (MRR, MAP, NDCG@k).
-- **RAGAS Evaluation**: Automatic assessment of context precision, answer relevancy, and faithfulness.
-- **Production-Ready**: Click-based CLI, Docker-compose setup, and Streamlit dashboard.
+<br/>
 
-## Tech Stack
+> Upload any PDF corpus → get BM25 + Vector + Hybrid retrieval → compare strategies head-to-head → auto-score with RAGAS + custom IR metrics. Everything runs locally.
 
-| Component | Technology | Why |
-|-----------|------------|-----|
-| UI | Streamlit | Rapid prototyping and interactive data exploration |
-| LLM Backend | Ollama | Run powerful LLMs locally without paid APIs |
-| Vector Store | ChromaDB | Lightweight, embedded, fast similarity search |
-| Evaluation | RAGAS | Industry standard for RAG metrics |
-| CLI | Click | Clean, robust, production-ready command line interface |
+</div>
 
-## Project Structure
+---
+
+## 📐 Architecture
 
 ```
-├── app.py               # Streamlit dashboard
-├── cli.py               # Click CLI entrypoint
-├── chroma_store.py      # ChromaDB client interface
-├── chunker.py           # Recursive chunking logic
-├── config.py            # Hardcoded settings and constants
-├── embedder.py          # Ollama embedding wrapper
-├── evaluation.py        # RAGAS metrics and LLM generation
-├── metrics.py           # Custom IR metrics from first principles
-├── pipeline.py          # Ingestion pipeline logic
-├── retrieval.py         # BM25, Vector, and Hybrid retrieval
-├── settings.py          # Pydantic BaseSettings config
-├── Dockerfile           # Multi-stage Docker build
-├── docker-compose.yml   # Compose stack for app and ollama
-├── Makefile             # Helper targets
-└── tests/               # Pytest suite
+┌─────────────────────────────────────────────────────────────────────┐
+│                         INGESTION LAYER                              │
+│                                                                       │
+│   PDFs  ──►  PyPDFLoader  ──►  RecursiveTextSplitter  ──►  Chunks   │
+│                                   (512 chars / 64 overlap)           │
+│                                         │                             │
+│                              content-hash dedup (md5[:12])           │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+          ┌────────────────────┴─────────────────────┐
+          │                                           │
+          ▼                                           ▼
+┌─────────────────────┐                   ┌──────────────────────────┐
+│    BM25 INDEX        │                   │     CHROMA VECTOR DB      │
+│                      │                   │                           │
+│  rank_bm25 tokenizer │                   │  nomic-embed-text (768d)  │
+│  stop-word filtered  │                   │  hnsw:space=cosine        │
+│  technical corpus    │                   │  batch_size=32            │
+└────────┬────────────┘                   └───────────┬──────────────┘
+         │   BM25 ranked list                         │   cosine similarity
+         │                                            │   (1 - dist)
+         └─────────────────┬──────────────────────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │     RRF FUSION          │
+              │                        │
+              │  score(d) = Σ 1/(k+r)  │   k=60 (Cormack 2009)
+              │  k exposed as slider   │
+              └────────────┬───────────┘
+                           │  top-k fused chunks
+                           ▼
+              ┌────────────────────────┐
+              │    OLLAMA GENERATION    │
+              │    llama3.2             │
+              │    grounded prompt      │
+              └────────────┬───────────┘
+                           │  answer + contexts
+                           ▼
+         ┌─────────────────────────────────────┐
+         │           EVALUATION LAYER           │
+         │                                      │
+         │  RAGAS          │  Custom IR Metrics  │
+         │  ─────────────  │  ─────────────────  │
+         │  Faithfulness   │  MRR, MAP           │
+         │  Ans Relevancy  │  NDCG@k (k=1,3,5)  │
+         │  Ctx Precision  │  Precision@k        │
+         └─────────────────────────────────────┘
 ```
 
-## Quickstart (Docker — recommended)
+---
 
-1. Ensure Docker and Docker Compose are installed.
-2. Run the stack:
-   ```bash
-   make docker-up
-   ```
-3. Wait for the `ollama-init` service to pull models.
-4. Access the Streamlit dashboard at `http://localhost:8501`.
+## ✨ What Makes This Different
 
-## Quickstart (Local)
+| Capability | This Project | Typical RAG Demo |
+|---|---|---|
+| Retrieval strategies | BM25 + Vector + Hybrid (RRF) | Vector only |
+| API dependency | ❌ Zero — fully local via Ollama | ✅ OpenAI required |
+| Evaluation | RAGAS + custom IR metrics from scratch | None or basic |
+| Architecture | Protocol interfaces, Pydantic v2 settings | Monolithic script |
+| Ops | Multi-stage Docker, CLI, Makefile | `python app.py` |
+| Tests | Pytest suite with coverage | None |
 
-1. Install Ollama locally and start the service.
-2. Pull required models:
-   ```bash
-   ollama pull llama3.2
-   ollama pull nomic-embed-text
-   ```
-3. Install Python dependencies:
-   ```bash
-   make install
-   ```
-4. Run the application:
-   ```bash
-   make run
-   ```
+---
 
-## CLI Reference
+## 🧠 Core Concepts
 
-### Ingest
-Ingests a directory of PDFs into ChromaDB.
+### Reciprocal Rank Fusion (RRF)
+```
+score(d) = Σᵢ  1 / (k + rankᵢ(d))
+```
+Documents appearing in **both** BM25 and vector result lists receive compounded scores. `k=60` is the Cormack (2009) default — exposed as a tunable slider in the dashboard.
+
+### Why BM25 Matters for Technical Text
+Dense vectors compress semantics but lose rare tokens. In medical/research corpora, terms like `"EEG"`, `"FTD"`, or `"p300"` carry extreme discriminative weight that BM25 captures exactly — fusion gets the best of both.
+
+### RAGAS via Local LLM
+The same `nomic-embed-text` encoder used for indexing is **reused** as the RAGAS embedding backend — no second model load, no API cost.
+
+---
+
+## 🗂️ Project Structure
+
+```
+HybridSearch Bench/
+│
+├── 📊  app.py                # 3-tab Streamlit dashboard
+│                             #   Tab 1: Query & Compare (side-by-side chunk cards)
+│                             #   Tab 2: Eval Dashboard (RAGAS radar + bar charts)
+│                             #   Tab 3: History (metric trend lines)
+│
+├── ⌨️  cli.py                # Click CLI — ingest / query / evaluate / benchmark / serve
+│
+├── 🗄️  chroma_store.py       # ChromaDB client — upsert, query, collection lifecycle
+├── ✂️  chunker.py            # RecursiveCharacterTextSplitter + md5 dedup
+├── ⚙️  config.py             # Hard constants (separator hierarchy, batch sizes)
+├── 🔢  embedder.py           # Ollama embedding wrapper (batch=32, 768-dim)
+│
+├── 📐  interfaces.py         # Protocol definitions — Retriever, Embedder, Evaluator
+├── 🚨  exceptions.py         # Custom exception hierarchy (IngestionError, RetrievalError…)
+├── 📝  logging.py            # Structured JSON logging with contextual fields
+├── ⚙️  settings.py           # Pydantic BaseSettings — all config from .env
+│
+├── 🔍  retrieval.py          # BM25Strategy / VectorStrategy / HybridStrategy (RRF)
+├── 📈  metrics.py            # MRR, MAP, NDCG@k — implemented from first principles
+├── 🧪  evaluation.py         # RAGAS runner via LangchainLLMWrapper(ChatOllama)
+├── 🔄  pipeline.py           # HybridSearchPipeline — orchestrates ingest→retrieve→eval
+│
+├── 🐳  Dockerfile            # Multi-stage build (builder + runtime, ~200MB final)
+├── 🐳  docker-compose.yml    # app + ollama + ollama-init (auto model pull)
+├── 🔧  Makefile              # install / lint / test / run / docker-up / docker-down
+├── 📋  pyproject.toml        # Package config, entry points, tool configs
+├── 📦  requirements.txt
+├── 📦  requirements-dev.txt
+├── 🔑  .env.example
+└── 🧪  tests/
+    ├── conftest.py           # Shared fixtures
+    ├── test_metrics.py       # Pure-function IR metric tests (edge + known values)
+    ├── test_chunker.py       # Chunk size, overlap, dedup assertions
+    └── test_retrieval.py     # RRF math unit tests with mock ChromaDB
+```
+
+---
+
+## 🚀 Quickstart
+
+### Option A — Docker *(recommended, one command)*
+
 ```bash
-python -m cli ingest --pdf-dir data/pdfs --collection hybrid_bench
+# 1. Clone and configure
+git clone https://github.com/YOUR_USERNAME/HybridSearch-Bench.git
+cd HybridSearch-Bench
+cp .env.example .env
+
+# 2. Start the full stack (app + Ollama + auto model pull ~4 GB first run)
+make docker-up
+
+# 3. Open the dashboard
+open http://localhost:8501
 ```
 
-### Query
-Queries the index using a specific strategy.
+> The `ollama-init` service automatically pulls `llama3.2` and `nomic-embed-text` on first boot. Subsequent starts are instant.
+
+---
+
+### Option B — Local Python
+
+**Prerequisites:** [Ollama](https://ollama.com/download) installed and running.
+
 ```bash
-python -m cli query --question "What is RAG?" --strategy hybrid --top-k 5
+# 1. Pull models
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# 2. Install project
+git clone https://github.com/YOUR_USERNAME/HybridSearch-Bench.git
+cd HybridSearch-Bench
+cp .env.example .env
+make install          # pip install -e ".[dev]"
+
+# 3. Ingest your PDFs
+mkdir -p data/pdfs
+# drop your PDFs into data/pdfs/
+make ingest           # python -m cli ingest --pdf-dir data/pdfs
+
+# 4. Launch dashboard
+make run              # streamlit run app.py → http://localhost:8501
 ```
 
-### Evaluate
-Evaluates a set of questions from a JSONL file and outputs a CSV report.
+---
+
+## ⌨️ CLI Reference
+
 ```bash
-python -m cli evaluate --questions-file eval_set.jsonl --output results.csv
+python -m cli [COMMAND] [OPTIONS]
 ```
 
-### Benchmark
-Runs all strategies on a question set and outputs a comparison table.
+| Command | What it does | Key flags |
+|---|---|---|
+| `ingest` | PDF → chunks → embeddings → ChromaDB | `--pdf-dir`, `--collection` |
+| `query` | Single question across strategies | `--question`, `--strategy [bm25\|vector\|hybrid]`, `--top-k` |
+| `evaluate` | RAGAS + IR metrics on JSONL question set | `--questions-file`, `--output` |
+| `benchmark` | All 3 strategies, side-by-side comparison table | `--questions-file`, `--output` |
+| `serve` | Launch Streamlit dashboard | — |
+
+**Examples:**
+
 ```bash
-python -m cli benchmark --questions-file eval_set.jsonl --output benchmark.csv
+# Ingest a corpus
+python -m cli ingest --pdf-dir data/pdfs --collection eeg_papers
+
+# Single hybrid query
+python -m cli query --question "What is attention mechanism?" --strategy hybrid --top-k 5
+
+# Full evaluation run
+python -m cli evaluate --questions-file eval_set.jsonl --output results/eval.csv
+
+# Strategy benchmark
+python -m cli benchmark --questions-file eval_set.jsonl --output results/benchmark.csv
 ```
 
-### Serve
-Launches the Streamlit app.
-```bash
-python -m cli serve
+**JSONL format for `--questions-file`:**
+```json
+{"question": "What is RAG?", "ground_truth": "Retrieval-Augmented Generation..."}
+{"question": "How does BM25 work?", "ground_truth": "BM25 ranks documents..."}
 ```
 
-## Evaluation Metrics
+---
 
-The evaluation utilizes two main paradigms:
+## 📊 Evaluation Metrics
 
-**1. RAGAS Metrics**
-- **Faithfulness**: Measures if the answer is hallucinated.
-- **Answer Relevancy**: Measures if the answer directly addresses the question.
-- **Context Precision**: Measures if relevant contexts are ranked higher.
+### RAGAS (Answer Quality)
 
-**2. Custom IR Metrics**
-- **MRR (Mean Reciprocal Rank)**: 
-  $$ MRR = \frac{1}{|Q|} \sum_{q=1}^{|Q|} \frac{1}{rank_i} $$
-- **MAP (Mean Average Precision)**:
-  $$ MAP = \frac{1}{|Q|} \sum_{q=1}^{|Q|} \frac{\sum_{k=1}^n (P(k) \times rel(k))}{|rel|} $$
-- **NDCG@k (Normalized Discounted Cumulative Gain)**:
-  $$ DCG@k = \sum_{i=1}^k \frac{rel_i}{\log_2(i + 1)} \quad \Rightarrow \quad NDCG@k = \frac{DCG@k}{IDCG@k} $$
+| Metric | What it measures | Range |
+|---|---|---|
+| **Faithfulness** | Does the answer stay grounded in retrieved contexts? No hallucination. | 0 → 1 |
+| **Answer Relevancy** | Is the answer on-topic and directly addresses the question? | 0 → 1 |
+| **Context Precision** | Are the most relevant chunks ranked highest in the retrieved set? | 0 → 1 |
 
-## Configuration
+### Custom IR Metrics (Retrieval Quality)
 
-Available `.env` variables:
+These are implemented **from first principles** in `metrics.py` — no external IR library.
+
+**Mean Reciprocal Rank (MRR)**
+```
+MRR = (1/|Q|) × Σ  1 / rank_first_relevant(q)
+```
+
+**Mean Average Precision (MAP)**
+```
+AP(q) = Σₖ [ P(k) × rel(k) ] / |relevant|
+MAP   = (1/|Q|) × Σ AP(q)
+```
+
+**Normalized Discounted Cumulative Gain (NDCG@k)**
+```
+DCG@k  = Σᵢ₌₁ᵏ  relᵢ / log₂(i + 1)
+NDCG@k = DCG@k / IDCG@k          (IDCG = perfect ranking DCG)
+```
+
+Reported at `k ∈ {1, 3, 5, 10}`.
+
+---
+
+## ⚙️ Configuration
+
+Copy `.env.example` → `.env` and adjust as needed.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama service URL |
-| `OLLAMA_MODEL` | `llama3.2` | Ollama chat model |
-| `OLLAMA_EMBED_MODEL`| `nomic-embed-text` | Ollama embedding model |
-| `CHROMA_PERSIST_DIR` | `./chroma_db` | Path to store Chroma vectors |
-| `CHROMA_COLLECTION_NAME`| `hybrid_bench` | Collection name |
-| `CHUNK_SIZE` | `512` | Characters per chunk |
-| `CHUNK_OVERLAP` | `64` | Chunk overlap |
-| `TOP_K` | `5` | Number of chunks to retrieve |
-| `RRF_K` | `60` | Constant for Reciprocal Rank Fusion |
+|---|---|---|
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
+| `OLLAMA_MODEL` | `llama3.2` | LLM for answer generation |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model (768-dim) |
+| `CHROMA_PERSIST_DIR` | `./chroma_db` | ChromaDB storage path |
+| `CHROMA_COLLECTION_NAME` | `hybrid_bench` | Collection name |
+| `CHUNK_SIZE` | `512` | Max characters per chunk |
+| `CHUNK_OVERLAP` | `64` | Overlap between consecutive chunks |
+| `TOP_K` | `5` | Chunks retrieved per strategy |
+| `RRF_K` | `60` | RRF constant (Cormack 2009 default) |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
+| `LOG_FORMAT` | `json` | `json` for structured, `text` for dev |
 
-## Running Tests
+---
 
-Run the test suite with coverage:
+## 🧪 Tests
+
 ```bash
 make test
+# → pytest tests/ -v --cov=. --cov-report=term-missing
 ```
 
-## Contributing
+```
+tests/test_metrics.py        # Pure IR metric correctness (edge cases + known values)
+tests/test_chunker.py        # Chunk size bounds, overlap, dedup
+tests/test_retrieval.py      # RRF fusion math, score normalization
+```
 
-PRs welcome! Ensure `make lint` and `make test` pass.
+```bash
+make lint     # ruff check . && mypy .
+make format   # ruff format .
+```
 
-## License
+---
 
-MIT
+## 🛠️ Makefile Targets
+
+```bash
+make install      # pip install -e ".[dev]"
+make run          # streamlit run app.py
+make ingest       # ingest PDFs from data/pdfs/
+make test         # pytest with coverage
+make lint         # ruff + mypy
+make format       # ruff format
+make docker-up    # docker compose up --build -d
+make docker-down  # docker compose down
+make clean        # remove __pycache__, .pytest_cache
+```
+
+---
+
+## 🧱 Tech Stack
+
+| Layer | Technology | Justification |
+|---|---|---|
+| **LLM** | Ollama (`llama3.2`) | Fully local, no API cost, swappable |
+| **Embeddings** | `nomic-embed-text` via Ollama | 768-dim, outperforms MiniLM on retrieval benchmarks |
+| **Sparse retrieval** | `rank-bm25` | Gold standard for keyword-heavy technical corpora |
+| **Vector store** | ChromaDB (HNSW, cosine) | Embedded, no server, production-serializable |
+| **Fusion** | Reciprocal Rank Fusion | Theoretically grounded, parameter-light (Cormack 2009) |
+| **Evaluation** | RAGAS + custom metrics | End-to-end RAG scoring + retrieval-level IR metrics |
+| **Settings** | Pydantic v2 `BaseSettings` | Type-safe, `.env`-driven, validated at startup |
+| **CLI** | Click | Composable, testable, `--help` autodoc |
+| **Dashboard** | Streamlit | Interactive eval visualization without frontend overhead |
+| **Containerization** | Docker multi-stage + Compose | Reproducible, lean runtime image (~200 MB) |
+| **Testing** | Pytest + coverage | Pure-function unit tests, no mocks for IR metrics |
+
+---
+
+## 📁 Dataset Ideas
+
+Works with any PDF corpus. Recommended for showcasing:
+
+- 📄 **ArXiv papers** — single topic (e.g. EEG classification, medical AI, transformers)
+- 📚 **Technical documentation** — framework docs, API references
+- 🏥 **Clinical guidelines** — structured medical PDFs
+- 📰 **Research reports** — dense, multi-section documents
+
+> Pro tip: Use 20–50 papers on a narrow topic for meaningful retrieval contrast between BM25 and vector strategies.
+
+---
+
+## 🤝 Contributing
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feat/your-feature`)
+3. Ensure `make lint` and `make test` pass
+4. Open a PR with a clear description
+
+---
+
+<div align="center">
+
+**Built with precision for the ML engineering portfolio.**  
+*If this helped you, a ⭐ goes a long way.*
+
+MIT License © 2026
+
+</div>
