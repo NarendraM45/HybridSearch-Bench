@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 from config import EMBEDDING_MODEL, RRF_K, TOP_K
-from ingestion import get_encoder
+from pipeline import SentenceTransformerEmbedder
 
 logger = logging.getLogger(__name__)
 
@@ -85,35 +85,39 @@ def bm25_search(
 # ── Dense Vector Search ───────────────────────────────────────────────────────
 
 def vector_search(
-    query: str,
-    collection,          # chromadb.Collection
+    query_or_embedding: Union[str, List[float]],
+    store,
     top_k: int = TOP_K,
 ) -> List[dict]:
     """
-    Encode the query with the shared sentence-transformer encoder and query
-    ChromaDB.  ChromaDB returns cosine *distance* → convert to similarity.
-    """
-    encoder: SentenceTransformer = get_encoder()
-    q_emb = encoder.encode([query])[0].tolist()
+    Dense vector search via ChromaStore.
 
-    res = collection.query(
-        query_embeddings=[q_emb],
-        n_results=top_k,
-        include=["documents", "metadatas", "distances"],
-    )
+    Accepts either a raw query string (embedded on the fly) or a pre-computed
+    embedding (e.g. from HyDE in HybridSearchPipeline).
+    """
+    if isinstance(query_or_embedding, str):
+        encoder = SentenceTransformerEmbedder()
+        q_emb = encoder.embed([query_or_embedding])[0]
+    else:
+        q_emb = query_or_embedding
+
+    from settings import get_settings
+    s = get_settings()
+
+    if s.parent_child_enabled:
+        res = store.query_children(embedding=q_emb, top_k=top_k)
+    else:
+        res = store.query(embedding=q_emb, top_k=top_k)
 
     results: List[dict] = []
-    for rank, (doc, meta, dist) in enumerate(
-        zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
-    ):
-        similarity = max(0.0, 1.0 - float(dist))   # cosine distance → similarity
+    for r in res:
         results.append(
             {
-                "text": doc,
-                "metadata": meta,
-                "score": similarity,
+                "text": r.document.text,
+                "metadata": r.document.metadata,
+                "score": r.score,
                 "rrf_score": None,
-                "rank": rank + 1,
+                "rank": r.rank,
                 "retriever": "vector",
             }
         )

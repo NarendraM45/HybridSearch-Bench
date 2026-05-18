@@ -21,14 +21,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from sentence_transformers import SentenceTransformer
 
-from config import (
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
-    CHROMA_PERSIST_DIR,
-    COLLECTION_NAME,
-    EMBEDDING_MODEL,
-    MIN_CHUNK_LEN,
-)
+from config import CHUNK_OVERLAP, CHUNK_SIZE, EMBEDDING_MODEL, MIN_CHUNK_LEN
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -147,16 +141,17 @@ def build_chroma_collection(
     By default wipes the existing collection first (reset=True) so that
     re-ingesting a new PDF starts clean.
     """
-    client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+    s = get_settings()
+    client = chromadb.PersistentClient(path=s.chroma_persist_dir)
 
     if reset:
         try:
-            client.delete_collection(COLLECTION_NAME)
+            client.delete_collection(s.collection_name)
         except Exception:
             pass  # Collection didn't exist yet — that's fine
 
     collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
+        name=s.collection_name,
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -173,7 +168,7 @@ def build_chroma_collection(
             metadatas=[c["metadata"] for c in batch],
         )
 
-    logger.info("ChromaDB: stored %d vectors in collection '%s'.", len(chunks), COLLECTION_NAME)
+    logger.info("ChromaDB: stored %d vectors in collection '%s'.", len(chunks), s.collection_name)
     return collection
 
 
@@ -220,5 +215,6 @@ def ingest_pdf(
 
 def load_existing_collection() -> chromadb.Collection:
     """Return the already-persisted ChromaDB collection (raises if absent)."""
-    client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-    return client.get_collection(COLLECTION_NAME)
+    s = get_settings()
+    client = chromadb.PersistentClient(path=s.chroma_persist_dir)
+    return client.get_collection(s.collection_name)

@@ -23,6 +23,7 @@ from settings import get_settings
 from logger_config import get_logger
 from exceptions import CollectionNotFoundError, StoreError
 from interfaces import Document, RetrievalResult
+from chunker import ParentChildChunk
 
 log = get_logger(__name__)
 
@@ -59,6 +60,42 @@ class ChromaStore:
                 metadata={"hnsw:space": "cosine"},
             )
         return self._collection
+
+    def list_collection_names(self) -> list[str]:
+        """Return all persisted collection names (for diagnostics)."""
+        return [c.name for c in self._client.list_collections()]
+
+    def _collection_count(self, name: str) -> int:
+        try:
+            return self._client.get_collection(name).count()
+        except Exception:
+            return 0
+
+    def _resolve_chunk_collection(self) -> tuple[chromadb.Collection, bool]:
+        """
+        Pick the collection that holds searchable child/flat chunks.
+
+        Returns (collection, is_parent_child_mode).
+        Prefers ``{base}_children`` when it has vectors; otherwise the flat
+        ``{base}`` collection.  Supports legacy ``hybridsearch_bench`` name.
+        """
+        base = self._collection_name
+        candidates: list[tuple[str, bool]] = [
+            (f"{base}_children", True),
+            (base, False),
+            ("hybridsearch_bench", False),  # legacy flat ingest via ingestion.py
+        ]
+        for name, is_pc in candidates:
+            if self._collection_count(name) > 0:
+                return self._client.get_collection(name), is_pc
+        # Nothing indexed yet — honour settings for the next ingest.
+        s = get_settings()
+        if s.parent_child_enabled:
+            return self._client.get_or_create_collection(
+                name=f"{base}_children",
+                metadata={"hnsw:space": "cosine"},
+            ), True
+        return self._get_or_create(), False
 
     # ── VectorStore Protocol ──────────────────────────────────────────────────
 
@@ -152,18 +189,170 @@ class ChromaStore:
 
         return results
 
-    def count(self) -> int:
+    def upsert_parent_child(self, parent_child_chunks: list[ParentChildChunk], embedded_children: list[Document]) -> None:
+        """Upsert into dual _children and _parents collections."""
+        if not parent_child_chunks or not embedded_children: return
+        
+        child_collection = self._client.get_or_create_collection(
+            name=f"{self._collection_name}_children",
+            metadata={"hnsw:space": "cosine"}
+        )
+        parent_collection = self._client.get_or_create_collection(
+            name=f"{self._collection_name}_parents",
+            metadata={"hnsw:space": "cosine"}
+        )
+        
+        batch_size = 512
+        
+        # Upsert parents (these don't necessarily have embeddings in this implementation, 
+        # or we just store them to retrieve text by id)
+        # We only need to store text/metadata for parents, no embeddings needed for retrieval
+        unique_parents = {}
+        for c in parent_child_chunks:
+            if c.parent_id not in unique_parents:
+                unique_parents[c.parent_id] = {
+                    "text": c.parent_text,
+                    "metadata": c.metadata,
+                }
+                
+        parent_ids = list(unique_parents.keys())
+        for start in range(0, len(parent_ids), batch_size):
+            batch_ids = parent_ids[start : start + batch_size]
+            parent_collection.upsert(
+                ids=batch_ids,
+                documents=[unique_parents[pid]["text"] for pid in batch_ids],
+                metadatas=[unique_parents[pid]["metadata"] for pid in batch_ids]
+            )
+            
+        # Upsert children (deduplicating to avoid DuplicateIDError)
+        unique_children = {}
+        for c in embedded_children:
+            if c.doc_id not in unique_children:
+                unique_children[c.doc_id] = c
+                
+        unique_child_list = list(unique_children.values())
+        child_ids = [c.doc_id for c in unique_child_list]
+        parent_id_by_child = {pc.child_id: pc.parent_id for pc in parent_child_chunks}
+        child_texts = [c.text for c in unique_child_list]
+        child_metadatas = []
+        for c in unique_child_list:
+            meta = dict(c.metadata)
+            pid = parent_id_by_child.get(c.doc_id)
+            if pid:
+                meta.setdefault("parent_id", pid)
+            child_metadatas.append(meta)
+        child_embeddings = [list(c.embedding) for c in unique_child_list]
+        
+        for start in range(0, len(child_ids), batch_size):
+            child_collection.upsert(
+                ids=child_ids[start : start + batch_size],
+                embeddings=child_embeddings[start : start + batch_size],
+                documents=child_texts[start : start + batch_size],
+                metadatas=child_metadatas[start : start + batch_size]
+            )
+
+    def query_children(self, embedding: list[float], top_k: int) -> list[RetrievalResult]:
+        """Query the _children collection."""
         try:
-            return self._get_or_create().count()
+            collection = self._client.get_collection(name=f"{self._collection_name}_children")
+        except Exception:
+            return []
+            
+        n = min(top_k, collection.count())
+        if n == 0: return []
+        
+        res = collection.query(
+            query_embeddings=[embedding],
+            n_results=n,
+            include=["documents", "metadatas", "distances"],
+        )
+        
+        results = []
+        if not res or not res["ids"] or not res["ids"][0]:
+            return results
+            
+        for rank, (doc_text, meta, dist) in enumerate(
+            zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
+        ):
+            similarity = max(0.0, 1.0 - float(dist))
+            doc = Document(
+                text=doc_text,
+                metadata=meta or {},
+                doc_id=res["ids"][0][rank],
+            )
+            results.append(
+                RetrievalResult(
+                    document=doc,
+                    score=similarity,
+                    rank=rank + 1,
+                    retriever="vector_child",
+                )
+            )
+        return results
+
+    def get_parents(self, parent_ids: list[str]) -> list[Document]:
+        """Fetch parent documents directly by their IDs."""
+        try:
+            collection = self._client.get_collection(name=f"{self._collection_name}_parents")
+        except Exception:
+            return []
+            
+        # Deduplicate
+        p_ids = list(set(parent_ids))
+        if not p_ids: return []
+        
+        res = collection.get(ids=p_ids, include=["documents", "metadatas"])
+        
+        docs = []
+        if res and res["ids"]:
+            for i in range(len(res["ids"])):
+                docs.append(Document(
+                    text=res["documents"][i],
+                    metadata=res["metadatas"][i] or {},
+                    doc_id=res["ids"][i]
+                ))
+        return docs
+
+    def get_all(self) -> list[dict]:
+        """Fetch all documents for BM25 building."""
+        try:
+            collection, _ = self._resolve_chunk_collection()
+            res = collection.get(include=["documents", "metadatas"])
+            if not res or not res["ids"]:
+                return []
+                
+            chunks = []
+            for i in range(len(res["ids"])):
+                chunks.append({
+                    "text": res["documents"][i],
+                    "metadata": res["metadatas"][i] or {},
+                })
+            return chunks
+        except Exception as e:
+            log.error(f"get_all failed: {e}")
+            return []
+
+    def count(self) -> int:
+        """Number of indexed chunk vectors (children or flat collection)."""
+        try:
+            collection, _ = self._resolve_chunk_collection()
+            return collection.count()
         except Exception:
             return 0
 
     def reset(self) -> None:
-        """Delete and recreate the collection (wipes all vectors)."""
-        try:
-            self._client.delete_collection(self._collection_name)
-        except Exception:
-            pass   # collection may not exist yet
+        """Delete and recreate all collections for this corpus (wipes all vectors)."""
+        base = self._collection_name
+        for name in (
+            base,
+            f"{base}_children",
+            f"{base}_parents",
+            "hybridsearch_bench",
+        ):
+            try:
+                self._client.delete_collection(name)
+            except Exception:
+                pass
         self._collection = None
         self._get_or_create()
         log.info("store.reset", collection=self._collection_name)
