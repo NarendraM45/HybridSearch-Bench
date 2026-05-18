@@ -104,6 +104,14 @@ def retrieval_report(queries: List[Dict], k_values: List[int] = [1,3,5,10]) -> D
     }
     for k in k_values:
         ndcg_sum = sum(ndcg_at_k(q['relevant_ids'], q['retrieved_ids'], k) for q in queries)
-        report[f"NDCG@{k}"] = ndcg_sum / len(queries) if queries else 0.0
-        
     return report
+
+def reranking_delta(before_queries: List[Dict], after_queries: List[Dict], k: int = 5) -> float:
+    """
+    Computes the improvement in mean NDCG@k from reranking.
+    """
+    if not before_queries or not after_queries:
+        return 0.0
+    ndcg_before = sum(ndcg_at_k(q['relevant_ids'], q['retrieved_ids'], k) for q in before_queries) / len(before_queries)
+    ndcg_after = sum(ndcg_at_k(q['relevant_ids'], q['retrieved_ids'], k) for q in after_queries) / len(after_queries)
+    return ndcg_after - ndcg_before

@@ -1,7 +1,7 @@
 """
 app.py — HybridSearch Bench  ·  Streamlit Dashboard
 =====================================================
-Hybrid RAG pipeline (BM25 + Dense Vector + RRF) with RAGAS auto-evaluation.
+Hybrid RAG pipeline (BM25 + Dense Vector + RRF) with Ollama-native quality evaluation.
 
 Run:
     streamlit run app.py
@@ -19,6 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from settings import get_settings
 
 # ── Page config (must be FIRST Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -148,6 +149,85 @@ METRIC_LABELS = {
 }
 
 
+def _with_alpha(colour: str, alpha: float) -> str:
+    """Convert a hex or rgb colour into a Plotly-safe rgba string."""
+    colour = colour.strip()
+
+    if colour.startswith("rgba("):
+        channels = [part.strip() for part in colour[5:-1].split(",")]
+        if len(channels) == 4:
+            return f"rgba({channels[0]}, {channels[1]}, {channels[2]}, {alpha})"
+
+    if colour.startswith("rgb("):
+        channels = [part.strip() for part in colour[4:-1].split(",")]
+        if len(channels) == 3:
+            return f"rgba({channels[0]}, {channels[1]}, {channels[2]}, {alpha})"
+
+    if colour.startswith("#"):
+        hex_value = colour.lstrip("#")
+        if len(hex_value) == 3:
+            hex_value = "".join(ch * 2 for ch in hex_value)
+        if len(hex_value) == 6:
+            r = int(hex_value[0:2], 16)
+            g = int(hex_value[2:4], 16)
+            b = int(hex_value[4:6], 16)
+            return f"rgba({r}, {g}, {b}, {alpha})"
+
+    return colour
+
+
+def _eval_strategy_keys(eval_res: Optional[Dict]) -> List[str]:
+    if not eval_res:
+        return []
+    return [k for k in eval_res if not k.startswith("__")]
+
+
+def _eval_meta(eval_res: Optional[Dict]) -> Dict:
+    if not eval_res:
+        return {}
+    return eval_res.get("__meta__", {})
+
+
+def _fmt_metric(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        f = float(value)
+        if f != f:  # NaN
+            return "N/A"
+        return f"{f:.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _show_eval_status_banner(eval_res: Optional[Dict]) -> None:
+    meta = _eval_meta(eval_res)
+    if not meta:
+        return
+    status = meta.get("status", "ok")
+    backend = meta.get("backend", "ollama")
+    messages = meta.get("messages") or []
+    if status == "ok":
+        st.success(f"Evaluation complete ({backend} backend).", icon="✅")
+    elif status == "partial":
+        st.warning(
+            f"Evaluation partially succeeded ({backend} backend). "
+            "Some metrics are missing — see details below.",
+            icon="⚠️",
+        )
+    else:
+        st.error(
+            f"Evaluation failed ({backend} backend). "
+            "Retrieval may have worked; check errors below.",
+            icon="🚨",
+        )
+    for msg in messages:
+        st.caption(f"• {msg}")
+    for err in meta.get("errors") or []:
+        if err.get("error"):
+            st.caption(f"• **{err.get('strategy', '?')}**: {err['error']}")
+
+
 # ── Session-state defaults ────────────────────────────────────────────────────
 
 def _init_state() -> None:
@@ -160,13 +240,57 @@ def _init_state() -> None:
         "eval_results": None,
         "eval_history": [],   # list of {query, results, eval, timestamp}
         "last_query": "",
+        "pipeline_error": None,
+        "eval_error": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-
 _init_state()
+
+# ── Auto-Detect Existing Collection ──
+@st.cache_resource(show_spinner=False)
+def _load_existing_collection():
+    from chroma_store import ChromaStore
+    from retrieval import build_bm25_index
+
+    store = ChromaStore()
+    db_has_data = False
+    chunk_count = 0
+    chunks = None
+    bm25_index = None
+
+    try:
+        collection, is_parent_child = store._resolve_chunk_collection()
+        chunk_count = collection.count()
+        if chunk_count > 0:
+            db_has_data = True
+            res = collection.get(include=["documents", "metadatas"])
+            chunks = [
+                {
+                    "text": res["documents"][i],
+                    "metadata": res["metadatas"][i] or {},
+                }
+                for i in range(chunk_count)
+            ]
+            if chunks:
+                bm25_index = build_bm25_index(chunks)
+            # Keep settings aligned with what is actually persisted.
+            settings = get_settings()
+            if settings.parent_child_enabled != is_parent_child:
+                settings.parent_child_enabled = is_parent_child
+    except Exception:
+        db_has_data = False
+
+    return store, db_has_data, chunk_count, chunks, bm25_index
+
+store, db_has_data, chunk_count, chunks, bm25_index = _load_existing_collection()
+if db_has_data and st.session_state.chunks is None:
+    st.session_state.collection = store
+    st.session_state.chunks = chunks
+    st.session_state.bm25_index = bm25_index
+    st.session_state.ingested_filename = f"{get_settings().collection_name}"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -174,7 +298,7 @@ _init_state()
 @st.cache_resource(show_spinner=False)
 def _cached_ingest(file_bytes: bytes, filename: str):
     """Cache ingestion result keyed by file content + name."""
-    from ingestion import ingest_pdf
+    from pipeline import ingest_pdf
     return ingest_pdf(file_bytes, filename)
 
 
@@ -227,18 +351,23 @@ with st.sidebar:
             with st.spinner("Running ingestion pipeline…"):
                 file_bytes = uploaded_file.read()
 
-                from ingestion import ingest_pdf
-                chunks, collection = ingest_pdf(file_bytes, uploaded_file.name, _cb)
-
-                from retrieval import build_bm25_index
-                bm25_idx = build_bm25_index(chunks)
+                from pipeline import ingest_pdf
+                # Append instead of replacing - pipeline handles parsing to Document objects
+                new_docs, collection = ingest_pdf(file_bytes, uploaded_file.name, progress_cb=_cb)
+                
+                # Retrieve the full chunks again since we appended
+                _load_existing_collection.clear()
+                store, db_has_data, chunk_count, chunks, bm25_index = _load_existing_collection()
 
             st.session_state.chunks = chunks
-            st.session_state.collection = collection
-            st.session_state.bm25_index = bm25_idx
+            st.session_state.collection = store
+            st.session_state.bm25_index = bm25_index
             st.session_state.ingested_filename = uploaded_file.name
             st.session_state.retrieval_results = None
             st.session_state.eval_results = None
+            
+            # Clear cache so next page reload fetches the new collection state
+            _load_existing_collection.clear()
 
             progress_bar.progress(1.0)
             status_txt.success(f"Ingested **{len(chunks)}** chunks ✓")
@@ -246,17 +375,48 @@ with st.sidebar:
     st.markdown("---")
 
     # ── Retrieval Settings ──
-    st.markdown("### ⚙️ Retrieval Settings")
-    top_k = st.slider("Top-K documents", min_value=1, max_value=10, value=5)
-    rrf_k = st.slider("RRF constant (k)", min_value=10, max_value=100, value=60, step=5,
-                       help="Higher k reduces the weight of top ranks. Default 60 is standard.")
+    st.markdown("### ⚙️ Pipeline Config")
+    
+    settings = get_settings()
+    
+    hyde_enabled = st.toggle("HyDE Query Expansion", value=settings.hyde_enabled)
+    hyde_blend_alpha = st.slider("HyDE Blend Alpha", min_value=0.0, max_value=1.0, value=settings.hyde_blend_alpha, disabled=not hyde_enabled)
+    
+    parent_child_enabled = st.toggle("Parent-Child Retrieval", value=settings.parent_child_enabled)
+    
+    reranker_enabled = st.toggle("Cross-Encoder Reranker", value=settings.reranker_enabled)
+    reranker_threshold = st.slider("Reranker Threshold", min_value=-5.0, max_value=5.0, value=settings.reranker_threshold, disabled=not reranker_enabled)
+    
+    colbert_enabled = st.toggle("ColBERT (Experimental)", value=settings.colbert_enabled)
+    
+    st.markdown("### 🎛️ Retrieval Tuning")
+    top_k = st.slider("Top-K documents", min_value=1, max_value=10, value=settings.top_k)
+    rrf_k = st.slider("RRF constant (k)", min_value=10, max_value=100, value=settings.rrf_k, step=5)
+    
+    # Update settings
+    settings.hyde_enabled = hyde_enabled
+    settings.hyde_blend_alpha = hyde_blend_alpha
+    settings.parent_child_enabled = parent_child_enabled
+    settings.reranker_enabled = reranker_enabled
+    settings.reranker_threshold = reranker_threshold
+    settings.colbert_enabled = colbert_enabled
+    settings.top_k = top_k
+    settings.rrf_k = rrf_k
 
     st.markdown("---")
-    st.markdown(
-        "<small style='color:#6b7280'>BM25 · Dense Vector · RRF Fusion  \n"
-        "Eval: RAGAS faithfulness + relevancy</small>",
-        unsafe_allow_html=True,
-    )
+    
+    # Active Pipeline display
+    st.markdown("### 🔄 Active Pipeline")
+    badges = []
+    if hyde_enabled: badges.append("<span style='background:#8b5cf6; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>HyDE</span>")
+    badges.append("<span style='background:#f97316; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>BM25</span>")
+    badges.append("<span style='background:#3b82f6; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>Vector</span>")
+    badges.append("<span style='background:#10b981; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>RRF</span>")
+    if parent_child_enabled: badges.append("<span style='background:#ec4899; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>P/C</span>")
+    if reranker_enabled: badges.append("<span style='background:#ef4444; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>Rerank</span>")
+    if colbert_enabled: badges.append("<span style='background:#eab308; padding:2px 8px; border-radius:10px; font-size:0.8rem; margin-right:4px;'>ColBERT</span>")
+    
+    st.markdown(" ".join(badges), unsafe_allow_html=True)
 
 
 # ── Main area ─────────────────────────────────────────────────────────────────
@@ -282,13 +442,15 @@ tab_query, tab_eval, tab_history = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_query:
-    if st.session_state.chunks is None:
+    db_has_data = st.session_state.chunks is not None and len(st.session_state.chunks) > 0
+    
+    if not db_has_data:
         st.info("👈  Upload and ingest a PDF in the sidebar to get started.")
     else:
+        settings = get_settings()
         st.success(
-            f"Corpus: **{st.session_state.ingested_filename}**  ·  "
-            f"**{len(st.session_state.chunks)}** chunks indexed",
-            icon="📚",
+            f"⚡ Connected to Backend Collection: **{settings.collection_name}** ({len(st.session_state.chunks)} chunks loaded)",
+            icon="✅",
         )
 
         # ── Query Input ──
@@ -310,23 +472,36 @@ with tab_query:
                 )
 
         if (run_btn or eval_btn) and query.strip():
-            from retrieval import run_all_strategies
+            import traceback
+            from pipeline import HybridSearchPipeline
+            from settings import get_settings
 
             st.session_state.last_query = query
             st.session_state.eval_results = None
+            st.session_state.pipeline_error = None
+            st.session_state.eval_error = None
 
-            with st.spinner("Running all retrieval strategies…"):
-                results = run_all_strategies(
-                    query,
-                    st.session_state.bm25_index,
-                    st.session_state.chunks,
-                    st.session_state.collection,
-                    top_k=top_k,
-                )
-            st.session_state.retrieval_results = results
+            results = None
+            try:
+                with st.spinner("Running advanced retrieval pipeline…"):
+                    pipeline = HybridSearchPipeline(
+                        store=st.session_state.collection,
+                        bm25_index=st.session_state.bm25_index,
+                        chunks=st.session_state.chunks,
+                    )
+                    if eval_btn:
+                        pipeline.settings.hyde_enabled = False
+                    results = pipeline.run(query)
+                st.session_state.retrieval_results = results
+                st.session_state.pipeline_logs = results.pop("logs", [])
+            except Exception as exc:
+                st.session_state.pipeline_error = str(exc)
+                st.session_state.retrieval_results = None
+                st.error(f"**Retrieval pipeline failed:** {exc}")
+                with st.expander("Retrieval error details"):
+                    st.code(traceback.format_exc())
 
-            # Auto-run evaluation if requested
-            if eval_btn:
+            if eval_btn and st.session_state.retrieval_results:
                 from evaluation import evaluate_all_strategies
 
                 eval_progress = st.progress(0.0)
@@ -337,42 +512,65 @@ with tab_query:
                     if msg:
                         eval_status.markdown(msg)
 
-                with st.spinner("Running RAGAS evaluation (this takes ~30 s)…"):
-                    eval_res = evaluate_all_strategies(
-                        query,
-                        results,
-                        ground_truth=ground_truth.strip() or None,
-                        progress_callback=_eval_cb,
-                    )
+                try:
+                    with st.spinner("Running quality evaluation (Ollama)…"):
+                        eval_res = evaluate_all_strategies(
+                            query,
+                            st.session_state.retrieval_results,
+                            ground_truth=ground_truth.strip() or None,
+                            progress_callback=_eval_cb,
+                        )
                     st.session_state.eval_results = eval_res
                     eval_progress.progress(1.0)
-                    eval_status.success("RAGAS evaluation complete ✓")
+                    eval_status.empty()
+                    _show_eval_status_banner(eval_res)
 
-                    # Save to history
                     st.session_state.eval_history.append(
                         {
                             "query": query,
-                            "results": results,
+                            "results": st.session_state.retrieval_results,
                             "eval": eval_res,
                             "timestamp": time.strftime("%H:%M:%S"),
                         }
                     )
+                except Exception as exc:
+                    st.session_state.eval_error = str(exc)
+                    st.session_state.eval_results = None
+                    eval_progress.empty()
+                    eval_status.empty()
+                    st.error(f"**Evaluation crashed:** {exc}")
+                    with st.expander("Evaluation error details"):
+                        st.code(traceback.format_exc())
+
+        if st.session_state.pipeline_error:
+            st.error(f"Last retrieval error: {st.session_state.pipeline_error}")
+        if st.session_state.eval_error:
+            st.error(f"Last evaluation error: {st.session_state.eval_error}")
 
         # ── Results columns ──
         if st.session_state.retrieval_results:
             results = st.session_state.retrieval_results
             eval_res = st.session_state.eval_results
 
+            if eval_res:
+                _show_eval_status_banner(eval_res)
+
             st.markdown("### Retrieved Documents")
 
-            cols = st.columns(3)
+            strategies = ["bm25", "vector", "hybrid"]
+            if get_settings().colbert_enabled:
+                strategies.append("colbert")
+                
+            cols = st.columns(len(strategies))
             strategy_labels = {
                 "bm25":   "📄 BM25",
                 "vector": "🔮 Vector",
                 "hybrid": "⚡ Hybrid (RRF)",
+                "colbert": "🌟 ColBERT"
             }
+            COLOURS["colbert"] = "#eab308"
 
-            for col, strategy in zip(cols, ["bm25", "vector", "hybrid"]):
+            for col, strategy in zip(cols, strategies):
                 with col:
                     colour = COLOURS[strategy]
                     st.markdown(
@@ -383,8 +581,11 @@ with tab_query:
 
                     # Show generated answer if eval ran
                     if eval_res and strategy in eval_res:
+                        _row = eval_res[strategy]
+                        if _row.get("error"):
+                            st.error(f"Eval: {_row['error']}")
                         st.markdown(
-                            f"<div class='answer-box'><b>Answer:</b><br>{eval_res[strategy]['answer']}</div>",
+                            f"<div class='answer-box'><b>Answer:</b><br>{_row.get('answer', '—')}</div>",
                             unsafe_allow_html=True,
                         )
                         st.markdown("")
@@ -393,9 +594,9 @@ with tab_query:
                         pills = ""
                         for mk, ml in METRIC_LABELS.items():
                             if mk in eval_res[strategy]:
-                                v = eval_res[strategy][mk]
                                 pills += (
-                                    f"<span class='metric-pill'>{ml[:4]}: {v:.2f}</span>"
+                                    f"<span class='metric-pill'>{ml[:4]}: "
+                                    f"{_fmt_metric(eval_res[strategy][mk])}</span>"
                                 )
                         st.markdown(pills, unsafe_allow_html=True)
                         st.markdown("")
@@ -444,6 +645,7 @@ with tab_query:
                         "BM25": COLOURS["bm25"],
                         "VECTOR": COLOURS["vector"],
                         "HYBRID": COLOURS["hybrid"],
+                        "COLBERT": COLOURS.get("colbert", "#eab308"),
                     },
                     height=340,
                     hover_data=["Chunk"],
@@ -458,6 +660,19 @@ with tab_query:
                 fig_scores.update_xaxes(showgrid=False)
                 fig_scores.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
                 st.plotly_chart(fig_scores, use_container_width=True)
+                
+            # Pipeline logs
+            if "pipeline_logs" in st.session_state and st.session_state.pipeline_logs:
+                st.markdown("---")
+                st.markdown("### ⏱️ Pipeline Latency Breakdown")
+                df_logs = pd.DataFrame(st.session_state.pipeline_logs)
+                df_logs["stage"] = df_logs["stage"].str.replace("_", " ").str.title()
+                fig_logs = px.bar(df_logs, x="latency_ms", y="stage", orientation='h', color="stage")
+                fig_logs.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="#e5e7eb",
+                    showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=300
+                )
+                st.plotly_chart(fig_logs, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -472,11 +687,13 @@ with tab_eval:
             "Run a query with **Retrieve + Evaluate** in the Query tab to populate this dashboard."
         )
     else:
-        st.markdown("### RAGAS Metrics — Strategy Comparison")
+        _show_eval_status_banner(eval_res)
+        st.markdown("### Quality Metrics — Strategy Comparison")
 
         # ── Metrics summary table ──
         table_rows = []
-        for strategy, data in eval_res.items():
+        for strategy in _eval_strategy_keys(eval_res):
+            data = eval_res[strategy]
             row = {"Strategy": f"{_strategy_icon(strategy)} {strategy.upper()}"}
             for mk in METRIC_LABELS:
                 row[METRIC_LABELS[mk]] = data.get(mk, float("nan"))
@@ -496,12 +713,16 @@ with tab_eval:
         metric_cols = [ml for ml in METRIC_LABELS.values() if ml in df_metrics.columns]
         if metric_cols:
             fig_metrics = go.Figure()
-            for strategy in eval_res:
+            for strategy in _eval_strategy_keys(eval_res):
                 fig_metrics.add_trace(
                     go.Bar(
                         name=strategy.upper(),
                         x=metric_cols,
-                        y=[eval_res[strategy].get(mk, 0) for mk in METRIC_LABELS if METRIC_LABELS[mk] in metric_cols],
+                        y=[
+                            float(eval_res[strategy].get(mk) or 0)
+                            for mk in METRIC_LABELS
+                            if METRIC_LABELS[mk] in metric_cols
+                        ],
                         marker_color=COLOURS[strategy],
                     )
                 )
@@ -524,8 +745,12 @@ with tab_eval:
         if len(radar_metrics) >= 3:
             st.markdown("### Radar — Strategy Profiles")
             fig_radar = go.Figure()
-            for strategy in eval_res:
-                vals = [eval_res[strategy].get(mk, 0) for mk in METRIC_LABELS if METRIC_LABELS[mk] in radar_metrics]
+            for strategy in _eval_strategy_keys(eval_res):
+                vals = [
+                    float(eval_res[strategy].get(mk) or 0)
+                    for mk in METRIC_LABELS
+                    if METRIC_LABELS[mk] in radar_metrics
+                ]
                 vals += [vals[0]]  # close the polygon
                 categories = radar_metrics + [radar_metrics[0]]
                 fig_radar.add_trace(
@@ -535,9 +760,7 @@ with tab_eval:
                         fill="toself",
                         name=strategy.upper(),
                         line_color=COLOURS[strategy],
-                        fillcolor=COLOURS[strategy].replace(")", ", 0.15)").replace("rgb", "rgba")
-                        if "rgb" in COLOURS[strategy]
-                        else COLOURS[strategy] + "26",
+                        fillcolor=_with_alpha(COLOURS[strategy], 0.15),
                     )
                 )
 
@@ -559,8 +782,9 @@ with tab_eval:
         # ── Generated answers side-by-side ──
         st.markdown("---")
         st.markdown("### Generated Answers")
-        ans_cols = st.columns(3)
-        for col, strategy in zip(ans_cols, eval_res):
+        strat_keys = _eval_strategy_keys(eval_res)
+        ans_cols = st.columns(max(len(strat_keys), 1))
+        for col, strategy in zip(ans_cols, strat_keys):
             with col:
                 colour = COLOURS[strategy]
                 st.markdown(

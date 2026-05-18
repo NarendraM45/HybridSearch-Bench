@@ -12,6 +12,7 @@ COPY requirements.txt .
 
 # Install dependencies to the user site-packages
 RUN pip install --no-cache-dir --user -r requirements.txt
+RUN python -m spacy download en_core_web_sm
 
 
 # Stage 2: Runtime
@@ -33,7 +34,7 @@ COPY . /app
 
 EXPOSE 8501
 
-HEALTHCHECK CMD curl -f http://localhost:8501/_stcore/health || exit 1
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"
 
 ENTRYPOINT ["python", "-m", "cli"]
 CMD ["serve"]

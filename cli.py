@@ -28,24 +28,38 @@ def main():
 @click.option('--collection', type=str, required=True, help="ChromaDB collection name to ingest into.")
 def ingest(pdf_dir: str, collection: str):
     """Run ingestion pipeline on a directory of PDFs."""
-    from ingestion import ingest_pdf
+    import os
     from chroma_store import ChromaStore
-    
+    from pipeline import ingest_pdf
+
     pdf_path = Path(pdf_dir)
     pdf_files = list(pdf_path.glob('*.pdf'))
-    
+
     if not pdf_files:
         click.secho(f"No PDF files found in {pdf_dir}", fg="red", err=True)
         sys.exit(1)
-        
+
+    # Persist collection name for this process and any child imports.
+    os.environ["CHROMA_COLLECTION_NAME"] = collection
+    get_settings.cache_clear()
     s = get_settings()
-    s.collection_name = collection
-    
+    click.echo(
+        f"Ingesting into Chroma at {s.chroma_persist_dir!r}, "
+        f"collection base name {s.collection_name!r} "
+        f"(parent-child suffixes: _children / _parents when enabled)."
+    )
+
     try:
-        with open(pdf_files[0], 'rb') as f:
-            pdf_bytes = f.read()
-        ingest_pdf(pdf_bytes, pdf_files[0].name)
-        click.secho("Ingestion complete.", fg="green")
+        for pdf_file in pdf_files:
+            click.echo(f"  → {pdf_file.name}")
+            with open(pdf_file, 'rb') as f:
+                pdf_bytes = f.read()
+            ingest_pdf(pdf_bytes, pdf_file.name)
+        click.secho(
+            f"Ingestion complete — {len(pdf_files)} PDF(s), "
+            f"collections: {ChromaStore().list_collection_names()}",
+            fg="green",
+        )
     except Exception as e:
         log.exception("Ingestion failed")
         click.secho(str(e), fg="red", err=True)

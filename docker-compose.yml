@@ -8,11 +8,13 @@ services:
       - .env
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
     ports:
       - "8501:8501"
     volumes:
       - ./data:/app/data
-      - chroma_data:/app/chroma_db
+      # Bind-mount so host `make ingest` and the Streamlit container share one Chroma store.
+      - ./chroma_db:/app/chroma_db
     depends_on:
       - ollama
       - ollama-init
@@ -43,5 +45,4 @@ services:
       "
 
 volumes:
-  chroma_data:
   ollama_data:

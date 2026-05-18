@@ -22,7 +22,7 @@ docker-down:
 	docker compose down
 
 ingest:
-	python -m cli ingest --pdf-dir data/pdfs --collection hybrid_bench
+	docker compose exec app python -m cli ingest --pdf-dir /app/data/pdfs --collection hybrid_bench
 
 clean:
 	find . -type d -name __pycache__ | xargs rm -rf
