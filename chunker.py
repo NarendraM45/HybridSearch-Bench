@@ -144,32 +144,47 @@ class SentenceChunker(BaseChunker):
         return chunks
 
 
+from dataclasses import dataclass
+
+@dataclass
+class ParentChildChunk:
+    child_id: str
+    parent_id: str
+    child_text: str
+    parent_text: str
+    source: str
+    metadata: dict
+
 # ── Strategy 3: Semantic Chunker ─────────────────────────────────────────────
 
 class SemanticChunker(BaseChunker):
     """
     Groups sentences into chunks by detecting semantic *breakpoints* — positions
     where the cosine similarity between adjacent sentence embeddings drops below
-    ``similarity_threshold``.
-
-    This mirrors the approach in (Chen et al., 2023) and produces topically
-    coherent chunks that improve retrieval precision on longer documents.
-
-    Time complexity: O(n) embedding calls + O(n) cosine comparisons,
-    where n = number of sentences.  Use an encoder with ONNX or GPU for speed.
+    the breakpoint_threshold_percentile (default 95th).
     """
 
     def __init__(
         self,
-        embedder: Any,                          # Embedder protocol — injected
-        similarity_threshold: float | None = None,
-        max_chunk_tokens: int = 512,
+        embedder: Any,
+        breakpoint_percentile: int | None = None,
+        min_chunk_size: int | None = None,
+        max_chunk_size: int = 1000,
     ) -> None:
         super().__init__()
         s = get_settings()
         self._embedder = embedder
-        self._threshold = similarity_threshold or s.semantic_similarity_threshold
-        self._max_tokens = max_chunk_tokens
+        self._percentile = breakpoint_percentile or s.semantic_breakpoint_percentile
+        self._min_chunk_size = min_chunk_size or s.semantic_min_chunk_size
+        self._max_chunk_size = max_chunk_size
+        
+        try:
+            import spacy
+            self.nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            import spacy.cli
+            spacy.cli.download("en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
 
     @staticmethod
     def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -177,26 +192,28 @@ class SemanticChunker(BaseChunker):
         return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
     def _split(self, text: str) -> list[str]:
-        sentences = nltk.sent_tokenize(text)
+        doc = self.nlp(text)
+        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        
         if len(sentences) <= 1:
             return sentences
 
         embeddings = np.array(self._embedder.embed(sentences), dtype=np.float32)
 
-        # Compute pairwise cosine similarity between consecutive sentences
         similarities = [
             self._cosine(embeddings[i], embeddings[i + 1])
             for i in range(len(sentences) - 1)
         ]
 
-        # Split at positions where similarity drops below threshold (topic shift)
+        threshold = np.percentile(similarities, 100 - self._percentile)
+
         chunks: list[str] = []
         current: list[str] = [sentences[0]]
 
         for i, sim in enumerate(similarities):
             next_sentence = sentences[i + 1]
             combined_len = len(" ".join(current + [next_sentence]))
-            if sim < self._threshold or combined_len > self._max_tokens:
+            if sim < threshold or combined_len > self._max_chunk_size:
                 chunks.append(" ".join(current))
                 current = [next_sentence]
             else:
@@ -204,8 +221,18 @@ class SemanticChunker(BaseChunker):
 
         if current:
             chunks.append(" ".join(current))
+            
+        # Merge small chunks
+        merged = []
+        for c in chunks:
+            if not merged:
+                merged.append(c)
+            elif len(c) < self._min_chunk_size:
+                merged[-1] += " " + c
+            else:
+                merged.append(c)
 
-        return chunks
+        return merged
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -226,16 +253,16 @@ def build_chunker(strategy: ChunkStrategy | None = None, **kwargs: Any) -> BaseC
     >>> chunker = build_chunker(ChunkStrategy.SEMANTIC, embedder=my_embedder)
     """
     s = get_settings()
-    strategy = strategy or s.chunk_strategy
+    strategy_str = strategy.value if isinstance(strategy, ChunkStrategy) else strategy
+    strategy_str = strategy_str or getattr(s, "chunker_type", "recursive")
 
-    match strategy:
-        case ChunkStrategy.RECURSIVE:
-            return RecursiveChunker(**kwargs)
-        case ChunkStrategy.SENTENCE:
-            return SentenceChunker(**kwargs)
-        case ChunkStrategy.SEMANTIC:
-            if "embedder" not in kwargs:
-                raise ValueError("SemanticChunker requires 'embedder' kwarg.")
-            return SemanticChunker(**kwargs)
-        case _:
-            raise ValueError(f"Unknown chunk strategy: {strategy!r}")
+    if strategy_str == "recursive" or strategy_str == ChunkStrategy.RECURSIVE.value:
+        return RecursiveChunker(**kwargs)
+    elif strategy_str == "sentence" or strategy_str == ChunkStrategy.SENTENCE.value:
+        return SentenceChunker(**kwargs)
+    elif strategy_str == "semantic" or strategy_str == ChunkStrategy.SEMANTIC.value:
+        if "embedder" not in kwargs:
+            raise ValueError("SemanticChunker requires 'embedder' kwarg.")
+        return SemanticChunker(**kwargs)
+    else:
+        raise ValueError(f"Unknown chunk strategy: {strategy_str!r}")

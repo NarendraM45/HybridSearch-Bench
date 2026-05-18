@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     )
 
     # ── Chunking ──────────────────────────────────────────────────────────────
-    chunk_strategy: ChunkStrategy = Field(default=ChunkStrategy.RECURSIVE)
+    chunker_type: str = Field(default="recursive", description="Type of chunker: 'recursive' or 'semantic'")
     chunk_size: int = Field(default=512, ge=64, le=4096)
     chunk_overlap: int = Field(default=64, ge=0)
     min_chunk_length: int = Field(default=60, ge=0)
@@ -81,10 +81,24 @@ class Settings(BaseSettings):
         le=1.0,
         description="Cosine similarity threshold used by SemanticChunker to merge sentences.",
     )
+    semantic_breakpoint_percentile: int = Field(default=95, ge=0, le=100)
+    semantic_min_chunk_size: int = Field(default=100, ge=0)
+
+    parent_child_enabled: bool = Field(default=True)
+    child_chunk_size: int = Field(default=128, ge=16)
+    parent_chunk_size: int = Field(default=512, ge=64)
+    child_chunk_overlap: int = Field(default=16, ge=0)
+    parent_chunk_overlap: int = Field(default=64, ge=0)
 
     # ── Vector Store (ChromaDB) ───────────────────────────────────────────────
-    chroma_persist_dir: str = Field(default="./chroma_db")
-    collection_name: str = Field(default="hybridsearch_bench")
+    chroma_persist_dir: str = Field(
+        default="./chroma_db",
+        validation_alias="CHROMA_PERSIST_DIR",
+    )
+    collection_name: str = Field(
+        default="hybrid_bench",
+        validation_alias="CHROMA_COLLECTION_NAME",
+    )
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     top_k: int = Field(default=5, ge=1, le=50)
@@ -94,8 +108,34 @@ class Settings(BaseSettings):
         description="RRF constant (k=60 per Cormack et al. 2009).  "
                     "Larger → flatter score distribution; smaller → amplifies rank gaps.",
     )
+    
+    hyde_enabled: bool = Field(default=True)
+    hyde_blend_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    hyde_fallback_on_error: bool = Field(default=True)
+    
+    colbert_enabled: bool = Field(default=False)
+    colbert_index_path: str = Field(default="./colbert_index")
+
+    # ── Reranking ─────────────────────────────────────────────────────────────
+    reranker_enabled: bool = Field(default=True)
+    reranker_model: str = Field(default="BAAI/bge-reranker-large")
+    reranker_top_k: int = Field(default=5, ge=1)
+    reranker_threshold: float = Field(default=0.3)
 
     # ── Evaluation ────────────────────────────────────────────────────────────
+    eval_backend: Literal["ollama", "ragas"] = Field(
+        default="ollama",
+        description="ollama = direct numeric prompts (recommended for local Ollama). "
+                    "ragas = RAGAS library (fragile with llama3 JSON output).",
+        validation_alias="EVAL_BACKEND",
+    )
+    eval_timeout: int = Field(
+        default=120,
+        ge=30,
+        le=600,
+        description="Per-metric Ollama call timeout (seconds).",
+        validation_alias="EVAL_TIMEOUT",
+    )
     eval_bootstrap_n: int = Field(
         default=1000,
         ge=100,
