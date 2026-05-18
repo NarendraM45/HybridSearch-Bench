@@ -1,0 +1,11 @@
+# Create .gitignore first
+echo "chroma_db/
+__pycache__/
+*.pyc
+.env
+data/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
+" > .gitignore
