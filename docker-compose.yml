@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hybridsearch_app
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - chroma_data:/app/chroma_db
+    depends_on:
+      - ollama
+      - ollama-init
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hybridsearch_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: hybridsearch_ollama_init
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: >
+      sh -c "
+      echo 'Waiting for Ollama...' &&
+      sleep 5 &&
+      ollama pull llama3.2 &&
+      ollama pull nomic-embed-text
+      "
+
+volumes:
+  chroma_data:
+  ollama_data:
